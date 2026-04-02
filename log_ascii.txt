@@ -1,0 +1,50 @@
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:generateDebugRFile UP-TO-DATE
+
+> Task :app:compileDebugKotlin FAILED
+.\gradlew.bat : e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/j
+ava/com/neko/player/MainActivity.kt:146:38 Cannot infer type for this parameter. Specify 
+it explicitly.
+???? ?:1 ??: 1
++ .\gradlew.bat compileDebugKotlin > log.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (e: file:///C:/U... it explicitly.:String) [ 
+   ], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:146:50 Unresolved reference 'name'.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:213:93 Cannot infer type for this parameter. Specify it explicitly.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:213:107 Unresolved reference 'name'.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:216:93 Cannot infer type for this parameter. Specify it explicitly.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:216:107 Unresolved reference 'name'.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:343:38 Unresolved reference 'getBoolean'.
+e: file:///C:/Users/cqx19/AndroidStudioProjects/NekoPlayer/app/src/main/java/com/neko/pla
+yer/MainActivity.kt:343:72 Cannot infer type for this parameter. Specify it explicitly.
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRu
+nnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to generate a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 1s
+6 actionable tasks: 1 executed, 5 up-to-date
