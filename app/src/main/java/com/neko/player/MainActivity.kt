@@ -56,6 +56,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.absoluteValue
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -232,14 +233,21 @@ fun AppScreen() {
             
             var isAnyLongPressActive by remember { mutableStateOf(false) }
 
-            // Recreate datasets properly parameterized on user logic
-            LaunchedEffect(horizontalPagerState.settledPage, isShuffleEnabled, videoUris, likedUris) {
-                if (horizontalPagerState.settledPage == 0) {
-                    allModeList = if (isShuffleEnabled) videoUris.shuffled() else videoUris.sortedBy { it.lastPathSegment }
-                } else {
-                    val filtered = videoUris.filter { it.toString() in likedUris }
-                    likedModeList = if (isShuffleEnabled) filtered.shuffled() else filtered.sortedBy { it.lastPathSegment }
-                }
+            // ─── allModeList ─── 与 likedUris 完全隔离，点赞不会触发此 effect ───────
+            LaunchedEffect(isShuffleEnabled, videoUris) {
+                allModeList = if (isShuffleEnabled)
+                    videoUris.shuffled()
+                else
+                    videoUris.sortedBy { it.lastPathSegment }
+            }
+
+            // ─── likedModeList ─── 只有这里才依赖 likedUris ─────────────────────────
+            LaunchedEffect(isShuffleEnabled, videoUris, likedUris) {
+                val filtered = videoUris.filter { it.toString() in likedUris }
+                likedModeList = if (isShuffleEnabled)
+                    filtered.shuffled()
+                else
+                    filtered.sortedBy { it.lastPathSegment }
             }
 
             Box(
@@ -251,7 +259,11 @@ fun AppScreen() {
                     state = horizontalPagerState,
                     modifier = Modifier.fillMaxSize()
                 ) { horizontalPage ->
-                    val currentList = if (horizontalPage == 0) allModeList else likedModeList
+                    val pageOffset = (horizontalPagerState.currentPage - horizontalPage) + horizontalPagerState.currentPageOffsetFraction
+                    val fadeAlpha = 1f - pageOffset.absoluteValue.coerceIn(0f, 1f)
+                    
+                    Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = fadeAlpha }) {
+                        val currentList = if (horizontalPage == 0) allModeList else likedModeList
 
                     if (currentList.isEmpty() && horizontalPage == 1) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -320,6 +332,7 @@ fun AppScreen() {
                             }
                         }
                     }
+                    } // <- Close the fadeBox
                 }
             }  // ← 关闭 layerBackdrop 捕捉层（只含视频）
 
@@ -374,7 +387,7 @@ fun AppScreen() {
                     color = Color.White.copy(alpha = 0.95f),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    modifier = Modifier.align(Alignment.CenterStart)
+                    modifier = Modifier.align(Alignment.CenterStart).pixelShift(2f)
                 )
 
                 if (isGlobal2xSpeed || isAnyLongPressActive) {
@@ -385,6 +398,7 @@ fun AppScreen() {
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .align(Alignment.CenterEnd)  // 与左侧标签同行对齐
+                            .pixelShift(2f)
                     )
                 }
             }
@@ -599,7 +613,7 @@ fun SettingsPanelContent(
             Text("Neko Player", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
             Text("一款极简的本地短视频播放器", fontSize = 14.sp, color = Color.Gray)
             Spacer(modifier = Modifier.height(4.dp))
-            Text("v2.0.0", fontSize = 12.sp, color = Color.Gray)
+            Text("v2.2.0", fontSize = 12.sp, color = Color.Gray)
         }
     }
 }

@@ -44,6 +44,21 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.layout
+import top.yukonga.miuix.kmp.blur.Backdrop
+import top.yukonga.miuix.kmp.blur.BlendColorEntry
+import top.yukonga.miuix.kmp.blur.BlurColors
+import top.yukonga.miuix.kmp.blur.textureBlur
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -72,6 +87,7 @@ fun VideoPlayerPage(
 
     var isLongPressActive by remember { mutableStateOf(false) }
     var speedChangedInPress by remember { mutableStateOf(false) }
+    var isFirstFrameRendered by remember { mutableStateOf(false) }
 
     // ✅ 创建一次，生命周期与 composable 绑定——不在 URI 变更时重建
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
@@ -83,6 +99,7 @@ fun VideoPlayerPage(
 
     // ✅ URI 变更：仅更新媒体项，不销毁 / 重建播放器
     LaunchedEffect(uri) {
+        isFirstFrameRendered = false
         exoPlayer.setMediaItem(MediaItem.fromUri(uri))
         exoPlayer.prepare()
     }
@@ -121,9 +138,12 @@ fun VideoPlayerPage(
         exoPlayer.setPlaybackSpeed(activePlaybackSpeed)
     }
 
-    // 视频结束事件
+    // 视频事件（结束、首帧）
     DisposableEffect(exoPlayer, isVisible, isAutoNext) {
         val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                isFirstFrameRendered = true
+            }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED && isVisible && isAutoNext) {
                     onVideoEnded()
@@ -208,11 +228,51 @@ fun VideoPlayerPage(
             }
         )
 
-        // 右下角操作按钮 — padding 避开大圆角屏幕（小米 17 等）
+        // 第一帧占位符，纯黑背景
+        androidx.compose.animation.AnimatedVisibility(
+            visible = !isFirstFrameRendered,
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(300)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            )
+        }
+
+        // 操作按鈕层——独立 composable 隔离重组，点赞状态变化不波及 AndroidView
+        ActionOverlay(
+            isLiked = isLiked,
+            onToggleLike = onToggleLike,
+            onOpenSettings = onOpenSettings
+        )
+    }
+}
+
+/**
+ * 操作按鈕浮层 — 独立 composable 节点。
+ * 当 isLiked 变化时，只有此函数重组；并不会导致父级 Box 或 AndroidView 的 update lambda 被调用。
+ */
+@Composable
+private fun ActionOverlay(
+    isLiked: Boolean,
+    onToggleLike: (Boolean) -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(bottom = 112.dp, end = 32.dp),  // end=32dp 远离边缘圆角
+                .padding(bottom = 112.dp, end = 32.dp)
+                .pixelShift(2f)
+                .background(
+                    color = Color.Black.copy(alpha = 0.2f),
+                    shape = CircleShape
+                )
+                .clip(CircleShape)
+                .padding(vertical = 12.dp, horizontal = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             IconButton(onClick = { onToggleLike(!isLiked) }) {
@@ -220,18 +280,55 @@ fun VideoPlayerPage(
                     imageVector = if (isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                     contentDescription = "Like",
                     tint = if (isLiked) Color.Red else Color.White,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.padding(4.dp).fillMaxSize()
                 )
             }
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             IconButton(onClick = onOpenSettings) {
                 Icon(
                     imageVector = Icons.Filled.Settings,
                     contentDescription = "Settings",
                     tint = Color.White,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.padding(4.dp).fillMaxSize()
                 )
             }
         }
     }
+}
+
+/**
+ * 像素偏移防烧屏机制（Pixel Shifting）
+ * 通过极慢的微距偏移，防止高亮静态元素长时间点亮同一批像素。
+ */
+fun Modifier.pixelShift(maxOffsetPx: Float = 2f): Modifier = composed {
+    val infiniteTransition = rememberInfiniteTransition(label = "pixel_shift")
+    
+    val offsetX by infiniteTransition.animateFloat(
+        initialValue = -maxOffsetPx,
+        targetValue = maxOffsetPx,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 11000), 
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "x_shift"
+    )
+    
+    val offsetY by infiniteTransition.animateFloat(
+        initialValue = -maxOffsetPx,
+        targetValue = maxOffsetPx,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 13000), 
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "y_shift"
+    )
+
+    this.then(
+        Modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, placeable.height) {
+                placeable.placeRelative(offsetX.toInt(), offsetY.toInt())
+            }
+        }
+    )
 }

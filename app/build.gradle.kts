@@ -5,16 +5,14 @@ plugins {
 
 android {
     namespace = "com.neko.player"
-    compileSdk {
-        version = release(37) {}
-    }
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.neko.player"
         minSdk = 31
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.5"
+        versionCode = 4
+        versionName = "2.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
