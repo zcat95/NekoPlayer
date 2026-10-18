@@ -3,6 +3,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val releaseStoreFile = providers.environmentVariable("NEKO_RELEASE_STORE_FILE")
+
 android {
     namespace = "com.neko.player"
     compileSdk = 37
@@ -11,15 +13,29 @@ android {
         applicationId = "com.neko.player"
         minSdk = 31
         targetSdk = 37
-        versionCode = 4
-        versionName = "2.2.0"
+        versionCode = 14
+        versionName = "2.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseStoreFile.isPresent) {
+            create("release") {
+                storeFile = file(releaseStoreFile.get())
+                storePassword = providers.environmentVariable("NEKO_RELEASE_STORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("NEKO_RELEASE_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("NEKO_RELEASE_KEY_PASSWORD").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -32,6 +48,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -43,13 +60,16 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
-    implementation(libs.androidx.documentfile)
+    implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.miuix.ui)
     implementation(libs.miuix.preference)
-    implementation(libs.miuix.blur)
+    implementation(libs.androidx.media3.database)
+    implementation(libs.miuix.icons)
+    implementation(libs.backdrop)
+    implementation(libs.kyant.shapes)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

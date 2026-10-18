@@ -18,3 +18,11 @@ local.properties
 build/
 log.txt
 log_ascii.txt
+
+.kotlin/
+
+# Private Android signing material
+*.jks
+*.keystore
+*.p12
+keystore.properties

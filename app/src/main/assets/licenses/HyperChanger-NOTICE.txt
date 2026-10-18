@@ -1,0 +1,18 @@
+HyperChanger
+Copyright 2026 btm_m
+https://github.com/ColdP/HyperChanger
+
+Portions of the first-launch wizard and settings UI (Oobe.kt, MainActivity.kt
+page layouts, top-bar material and toolbar buttons, LiquidInteraction.kt,
+GlassNavigation.kt, GlassDropdownMenu.kt, AboutMaterialBackground.kt, and MiuiBlendImageView.kt) are adapted from commit
+5d84f123a7655466ab2a122ca17fad1712d9afe5 to Neko Player.
+Changes: four Neko Player setup pages, local folder authorization, playback
+preferences, lifecycle integration, small-screen layouts, gesture handling,
+Neko Player navigation and branding, a simplified About page, GitHub profile
+loading, a glass theme-selection popup, and Android 12 rendering fallbacks.
+Licensed under the Apache License, Version 2.0; see HyperChanger-Apache-2.0.txt.
+
+LiquidInteraction.kt includes interaction helpers adapted by HyperChanger from
+the Backdrop catalog's LiquidBottomTabs. Backdrop is Copyright 2025 Kyant,
+licensed under the Apache License, Version 2.0.
+https://github.com/Kyant0/AndroidLiquidGlass

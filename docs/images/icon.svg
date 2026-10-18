@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="18 18 72 72" role="img" aria-label="Neko Player">
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#72B5FA"/><stop offset="1" stop-color="#5396F2"/></linearGradient>
+    <clipPath id="icon-mask"><rect x="18" y="18" width="72" height="72" rx="16"/></clipPath>
+  </defs>
+  <g clip-path="url(#icon-mask)">
+    <rect x="18" y="18" width="72" height="72" fill="url(#blue)"/>
+    <path d="M38,40.5H70C73.9,40.5 77,43.6 77,47.5V66C77,69.9 73.9,73 70,73H38C34.1,73 31,69.9 31,66V47.5C31,43.6 34.1,40.5 38,40.5Z" fill="none" stroke="white" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M35.7,40.5L39.4,32.5C39.9,31.3 41.1,31.1 42,32.2L48,40.5ZM60,40.5L66,32.2C66.9,31.1 68.1,31.3 68.6,32.5L72.3,40.5Z" fill="white"/>
+    <path d="M51,49.4C50.1,48.9 49.3,49.4 49.3,50.5V63C49.3,64.1 50.1,64.6 51,64.1L61.4,57.9C62.4,57.3 62.4,56.2 61.4,55.6Z" fill="white"/>
+  </g>
+</svg>
