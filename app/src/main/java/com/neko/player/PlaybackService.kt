@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.core.content.edit
 import androidx.media3.common.AudioAttributes
@@ -20,8 +21,12 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import androidx.media3.session.SessionError
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -30,9 +35,26 @@ import org.json.JSONObject
 class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var mediaCache: PlaybackMediaCache
+    private lateinit var watchHistory: WatchHistory
+    private val watchProgress = WatchProgress()
+    private var preferredPreloadIds: List<String>? = null
+    private var preloadSuspended = false
+    private val watchCheckpoint = object : Runnable {
+        override fun run() {
+            watchProgress.sample(player.currentMediaItem?.mediaId, player.duration, player.isPlaying,
+                SystemClock.elapsedRealtime(), player.playbackParameters.speed)?.let(watchHistory::markWatched)
+            if (player.isPlaying && !watchHistory.isWatched(player.currentMediaItem?.mediaId))
+                handler.postDelayed(this, 250)
+        }
+    }
     private val preloadNeighbours = Runnable {
+        // Give the current clip's first frame priority over speculative disk reads.
+        if (player.playbackState != Player.STATE_READY || preloadSuspended) return@Runnable
         val current = player.currentMediaItemIndex
-        val uris = previewIndices(current, player.mediaItemCount).filter { it != current }
+        val indices = preferredPreloadIds?.mapNotNull { id ->
+            (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == id }
+        } ?: previewIndices(current, player.mediaItemCount)
+        val uris = indices.filter { it != current }
             .mapNotNull { player.getMediaItemAt(it).localConfiguration?.uri?.toString() }
         mediaCache.preload(uris)
     }
@@ -50,6 +72,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        watchHistory = WatchHistory(this)
         mediaCache = PlaybackMediaCache(this)
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(mediaCache.factory))
@@ -63,6 +86,10 @@ class PlaybackService : MediaSessionService() {
         player.volume = if (prefs.getBoolean("isColdStartMuted", false)) 0f else 1f
         player.setPlaybackSpeed(if (prefs.getBoolean("isGlobal2xSpeed", false)) 2f else 1f)
         player.addListener(object : Player.Listener {
+            override fun onEvents(player: Player, events: Player.Events) {
+                handler.removeCallbacks(watchCheckpoint)
+                watchCheckpoint.run()
+            }
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
                 // Coalesce a shuffle's individual move commands into one preferences write.
                 handler.removeCallbacks(queueCheckpoint)
@@ -72,6 +99,8 @@ class PlaybackService : MediaSessionService() {
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 savePosition()
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) preferredPreloadIds = null
+                mediaCache.preload(emptyList())
                 handler.removeCallbacks(preloadNeighbours)
                 handler.postDelayed(preloadNeighbours, 150)
             }
@@ -81,6 +110,8 @@ class PlaybackService : MediaSessionService() {
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
+                    handler.removeCallbacks(preloadNeighbours)
+                    handler.postDelayed(preloadNeighbours, 150)
                     player.currentMediaItem?.mediaId?.let(failedIds::remove)
                     if (session?.sessionExtras?.isEmpty == false) session?.setSessionExtras(Bundle.EMPTY)
                 }
@@ -107,6 +138,38 @@ class PlaybackService : MediaSessionService() {
         session = MediaSession.Builder(this, player)
             .setSessionActivity(activityIntent)
             .setCallback(object : MediaSession.Callback {
+                override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
+                    val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+                    if (controller.packageName == packageName) {
+                        listOf(PlaybackCommands.PREFETCH, PlaybackCommands.CACHE_SIZE, PlaybackCommands.CLEAR_CACHE)
+                            .forEach { commands.add(SessionCommand(it, Bundle.EMPTY)) }
+                    }
+                    return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                        .setAvailableSessionCommands(commands.build()).build()
+                }
+
+                override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo,
+                    customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+                    if (controller.packageName != packageName)
+                        return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
+                    return when (customCommand.customAction) {
+                        PlaybackCommands.PREFETCH -> {
+                            preferredPreloadIds = args.getStringArrayList(PlaybackCommands.IDS)?.take(4)
+                            preloadSuspended = args.getBoolean(PlaybackCommands.SCROLLING)
+                            handler.removeCallbacks(preloadNeighbours)
+                            mediaCache.preload(emptyList())
+                            if (!preloadSuspended) handler.postDelayed(preloadNeighbours, 150)
+                            Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                        }
+                        PlaybackCommands.CACHE_SIZE -> Futures.immediateFuture(cacheResult(mediaCache.bytes))
+                        PlaybackCommands.CLEAR_CACHE -> {
+                            handler.removeCallbacks(preloadNeighbours)
+                            Futures.transform(mediaCache.clear(), { bytes -> cacheResult(bytes ?: 0L) }, MoreExecutors.directExecutor())
+                        }
+                        else -> Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+                    }
+                }
+
                 override fun onPlaybackResumption(
                     mediaSession: MediaSession,
                     controller: MediaSession.ControllerInfo,
@@ -123,6 +186,9 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+
+    private fun cacheResult(bytes: Long) = SessionResult(SessionResult.RESULT_SUCCESS,
+        Bundle().apply { putLong(PlaybackCommands.BYTES, bytes) })
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         if (!prefs.getBoolean("isBackgroundPlayAllowed", false) || !player.playWhenReady) {

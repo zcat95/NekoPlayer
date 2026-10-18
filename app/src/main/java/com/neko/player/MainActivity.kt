@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
@@ -32,11 +33,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
@@ -159,6 +165,7 @@ internal fun VideoScreen(model: PlayerViewModel, mode: Int, chooseDirectory: () 
 }
 
 @Composable
+@OptIn(UnstableApi::class)
 private fun VideoPlaylist(model: PlayerViewModel, mode: Int) {
     val entries = model.playlist(mode)
     val active = mode == model.activeMode
@@ -167,25 +174,45 @@ private fun VideoPlaylist(model: PlayerViewModel, mode: Int) {
     LaunchedEffect(active, model.currentId, entries) {
         if (active) {
             val index = entries.indexOfFirst { it.id == model.currentId }
-            if (index >= 0 && index != pager.settledPage) pager.scrollToPage(index)
+            // A natural media transition must not interrupt an in-flight user swipe.
+            if (index >= 0 && index != pager.settledPage && !pager.isScrollInProgress) pager.scrollToPage(index)
         }
     }
     LaunchedEffect(pager, active, entries) {
-        if (active) snapshotFlow { pager.settledPage }.distinctUntilChanged().drop(1).collect { index ->
-            entries.getOrNull(index)?.let { model.selectVideo(it.id) }
+        if (active) snapshotFlow { pager.settledPage to pager.isScrollInProgress }
+            .distinctUntilChanged().drop(1).collect { (index, scrolling) ->
+            // Also restore the visible clip after a cancelled swipe if auto-next fired during the drag.
+            if (!scrolling) entries.getOrNull(index)?.let { model.selectVideo(it.id) }
         }
     }
     LaunchedEffect(pager, entries, active) {
-        if (active) snapshotFlow { pager.currentPage }.distinctUntilChanged().collect { index ->
-            model.frames.prefetch(entries, entries.getOrNull(index)?.id)
+        val policy = SwipePreloadPolicy()
+        if (active) snapshotFlow { Triple(pager.currentPage, pager.targetPage, pager.isScrollInProgress) }
+            .distinctUntilChanged().collect { (current, target, scrolling) ->
+            model.prefetchVideos(mode, policy.update(current, target, entries.size, scrolling, SystemClock.elapsedRealtime()))
         }
     }
     if (entries.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("暂无收藏视频，在首页点赞后会显示在这里。", color = Color.White)
         }
-    } else VerticalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { entries[it].id }) { index ->
-        val entry = entries[index]
-        VideoPlayerPage(entry, active && entry.id == model.currentId, model)
+    } else Box(Modifier.fillMaxSize().clipToBounds()) {
+        val player = model.controller
+        val currentId = model.currentId
+        var renderedId by remember(player, active) { mutableStateOf<String?>(null) }
+        val currentIndex = entries.indexOfFirst { it.id == currentId }
+        if (active && player != null && currentId != null && currentIndex >= 0) {
+            VideoPlaybackSurface(player, model.settings.crop, model.isPlaying,
+                onFirstFrame = { renderedId = it },
+                modifier = Modifier.graphicsLayer {
+                    // Follow the playing page during a drag without recreating or rebinding the surface.
+                    translationY = ((currentIndex - pager.currentPage) - pager.currentPageOffsetFraction) * size.height
+                })
+        }
+        VerticalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { entries[it].id }) { index ->
+            val entry = entries[index]
+            VideoPlayerPage(entry, active && entry.id == currentId, model,
+                frameReady = renderedId == entry.id)
+        }
     }
 }

@@ -1,6 +1,7 @@
 package com.neko.player
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import top.yukonga.miuix.kmp.basic.*
@@ -9,14 +10,27 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 
 @Composable
 internal fun SettingsPage(model: PlayerViewModel, onChangeFolder: () -> Unit, onBack: () -> Unit, onAbout: () -> Unit) {
+    LaunchedEffect(model.controller) { model.refreshCacheUsage() }
+    val cacheSummary = if (model.playbackCacheBytes == null) model.cacheStatus ?: "正在读取…" else
+        "播放缓存 ${formatCacheBytes(model.playbackCacheBytes!!)} · 预览 ${formatCacheBytes(model.frames.bytes)}"
     SettingsContent(model.settings, model.directoryLabel, model.videos.size, model.playlist(1).size,
-        model::updateSettings, onChangeFolder, onAbout, onBack)
+        model::updateSettings, onChangeFolder, onAbout, onBack,
+        cacheSummary, model.clearingCache, model.cacheStatus, model::clearCache)
+}
+
+internal fun formatCacheBytes(bytes: Long): String = when {
+    bytes <= 0 -> "0 B"
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+    else -> "${"%.1f".format(bytes / (1024.0 * 1024))} MB"
 }
 
 @Composable
 internal fun SettingsContent(value: PlayerSettings, directory: String?, videoCount: Int, favoriteCount: Int,
                              update: (PlayerSettings) -> Unit,
-                             onChangeFolder: () -> Unit, onAbout: () -> Unit, onBack: (() -> Unit)? = null) {
+                             onChangeFolder: () -> Unit, onAbout: () -> Unit, onBack: (() -> Unit)? = null,
+                             cacheSummary: String = "0 B", clearingCache: Boolean = false,
+                             cacheStatus: String? = null, onClearCache: () -> Unit = {}) {
     SettingsScaffold("设置", onBack = onBack) { padding, scroll ->
         SettingsList(padding, scroll, bottom = 28) {
             item {
@@ -24,6 +38,11 @@ internal fun SettingsContent(value: PlayerSettings, directory: String?, videoCou
                     ArrowPreference(title = "视频目录", summary = directory ?: "尚未选择路径", onClick = onChangeFolder)
                     BasicComponent(title = "已扫描视频", summary = "共 $videoCount 个视频")
                     BasicComponent(title = "当前目录收藏", summary = "共 $favoriteCount 个视频")
+                    BasicComponent(title = "缓存占用", summary = cacheSummary)
+                    ArrowPreference(title = if (clearingCache) "正在清理…" else "清理缓存",
+                        summary = cacheStatus ?: "清理播放缓存和预览图，保留视频、收藏与已看记录",
+                        enabled = !clearingCache, onClick = onClearCache,
+                        modifier = Modifier.testTag("clear-cache"))
                 }
             }
             item {
@@ -38,6 +57,10 @@ internal fun SettingsContent(value: PlayerSettings, directory: String?, videoCou
                 SettingsGroup("播放偏好") {
                     SwitchPreference(value.shuffle, { update(value.copy(shuffle = it)) },
                         "随机播放", summary = "打乱列表播放，关闭则按名称顺序")
+                    SwitchPreference(value.preferUnwatched, { update(value.copy(preferUnwatched = it)) },
+                        "未看优先", summary = "随机播放时优先播放未看视频，记录仅保存在本机",
+                        modifier = Modifier.testTag("prefer-unwatched"),
+                        enabled = value.shuffle)
                     SwitchPreference(value.autoNext, { update(value.copy(autoNext = it)) },
                         "自动播放下一个", summary = "播完接续下一个，关闭则单视频循环")
                     SwitchPreference(value.crop, { update(value.copy(crop = it)) },

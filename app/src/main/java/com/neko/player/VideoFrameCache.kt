@@ -28,6 +28,8 @@ internal class VideoFrameCache(private val context: Context, private val scope: 
     private val decoders = Semaphore(1)
     private var revision by mutableIntStateOf(0)
 
+    val bytes: Long get() { revision; return cache.size().toLong() }
+
     fun peek(id: String): Bitmap? { revision; return cache.get(id) }
 
     fun request(id: String): Deferred<Bitmap?> {
@@ -56,10 +58,21 @@ internal class VideoFrameCache(private val context: Context, private val scope: 
 
     fun prefetch(entries: List<VideoEntry>, currentId: String?) {
         val current = entries.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
-        val wanted = previewIndices(current, entries.size).map { entries[it].id }
+        prefetch(entries, previewIndices(current, entries.size))
+    }
+
+    fun prefetch(entries: List<VideoEntry>, indices: List<Int>) {
+        val wanted = indices.mapNotNull { entries.getOrNull(it)?.id }.distinct()
         // Rapid swipes must not leave old decodes queued ahead of the current viewport.
         pending.entries.toList().filter { it.key !in wanted }.forEach { it.value.cancel() }
         wanted.forEach(::request)
+    }
+
+    fun clear() {
+        pending.values.toList().forEach { it.cancel() }
+        cache.evictAll()
+        failed.clear()
+        revision++
     }
 
     fun onLibraryChanged() { failed.clear() }

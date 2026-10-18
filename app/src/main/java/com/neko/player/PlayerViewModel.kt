@@ -2,7 +2,10 @@ package com.neko.player
 
 import android.app.Application
 import android.content.ComponentName
+import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
@@ -23,6 +26,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CancellationException
@@ -34,6 +39,7 @@ import kotlinx.coroutines.withContext
 @OptIn(UnstableApi::class)
 data class PlayerSettings(
     val shuffle: Boolean = true,
+    val preferUnwatched: Boolean = true,
     val autoNext: Boolean = true,
     val crop: Boolean = true,
     val global2x: Boolean = false,
@@ -46,8 +52,15 @@ data class PlayerSettings(
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("neko_prefs", Application.MODE_PRIVATE)
     private val setupPrefs = application.getSharedPreferences("neko_first_launch", Application.MODE_PRIVATE)
+    private val watchHistory = WatchHistory(application)
+    private var watchedIds = watchHistory.watchedIds()
+    private val historyListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        // Do not reorder a running feed when a clip crosses the watched threshold.
+        watchedIds = watchHistory.watchedIds()
+    }
     var settings by mutableStateOf(PlayerSettings(
         shuffle = prefs.getBoolean("isShuffleEnabled", true),
+        preferUnwatched = prefs.getBoolean("preferUnwatched", true),
         autoNext = prefs.getBoolean("isAutoNext", true),
         crop = prefs.getInt("resizeMode", AspectRatioFrameLayout.RESIZE_MODE_ZOOM) == AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
         global2x = prefs.getBoolean("isGlobal2xSpeed", false),
@@ -92,6 +105,22 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var foreground = false
     private var playbackPageVisible = true
     internal val frames = VideoFrameCache(application, viewModelScope)
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    private val memoryCallbacks = object : ComponentCallbacks2 {
+        override fun onConfigurationChanged(newConfig: Configuration) = Unit
+        override fun onLowMemory() { frames.clear() }
+        override fun onTrimMemory(level: Int) {
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) frames.clear()
+        }
+    }
+    var playbackCacheBytes by mutableStateOf<Long?>(null)
+        private set
+    var clearingCache by mutableStateOf(false)
+        private set
+    var cacheStatus by mutableStateOf<String?>(null)
+        private set
+    private var preloadIds = emptyList<String>()
+    private var preloadScrolling = false
     private var pendingAutoplay = false
     private var requestedUnmute = false
     private var library = emptyList<VideoEntry>()
@@ -116,6 +145,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        application.registerComponentCallbacks(memoryCallbacks)
+        watchHistory.preferences.registerOnSharedPreferenceChangeListener(historyListener)
         // Fixed layout replaces all old visual overrides, including restored backups.
         prefs.edit {
             putInt("active_mode", 0)
@@ -156,6 +187,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 applyPlaybackSettings()
                 syncQueue()
+                sendPreloadWindow()
             } catch (e: Exception) {
                 message = "无法连接播放服务，请重新打开应用。"
             }
@@ -246,7 +278,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 library = entries
                 frames.onLibraryChanged()
-                videos = orderVideos(entries, settings.shuffle)
+                videos = orderedLibrary()
                 directoryReadable = true
                 scanning = false
                 syncQueue()
@@ -283,7 +315,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val index = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == id } ?: return
         rememberPosition()
         player.seekTo(index, positions[id] ?: 0L)
-        player.prepare()
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
         lifecyclePolicy.userAction()
         if (playbackPageVisible && (foreground || settings.backgroundPlay)) player.play()
         currentId = id
@@ -310,9 +342,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onForegroundChanged(value: Boolean) {
         foreground = value
+        if (value && playbackPageVisible) frames.prefetch(playlist(activeMode), currentId)
         if (value && !onboardingCompleted) refreshDirectoryAccess()
         if (!value) { onLongPressChanged(false); rememberPosition() }
         val player = controller ?: return
+        sendPreloadWindow()
         if (value && playbackPageVisible && pendingAutoplay && player.mediaItemCount > 0) {
             pendingAutoplay = false
             player.play()
@@ -329,21 +363,67 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playbackPageVisible = visible
         onLongPressChanged(false)
         onForegroundChanged(foreground)
+        if (visible) frames.prefetch(playlist(activeMode), currentId)
     }
 
-    fun onLongPressChanged(value: Boolean) {
-        longPress = value && !settings.global2x && foreground
-        controller?.setPlaybackSpeed(if (settings.global2x || longPress) 2f else 1f)
+    fun onLongPressChanged(value: Boolean): Boolean {
+        val previous = longPress
+        longPress = value && !settings.global2x && foreground && playbackPageVisible && isPlaying
+        if (longPress != previous) controller?.setPlaybackSpeed(if (settings.global2x || longPress) 2f else 1f)
+        return longPress && !previous
+    }
+
+    internal fun prefetchVideos(mode: Int, window: PreloadWindow) {
+        if (mode != activeMode) return
+        val entries = playlist(mode)
+        frames.prefetch(entries, window.indices)
+        preloadIds = window.indices.mapNotNull { entries.getOrNull(it)?.id }
+        preloadScrolling = window.scrolling
+        sendPreloadWindow()
+    }
+
+    private fun sendPreloadWindow() {
+        controller?.sendCustomCommand(SessionCommand(PlaybackCommands.PREFETCH, Bundle.EMPTY), Bundle().apply {
+            putStringArrayList(PlaybackCommands.IDS, ArrayList(preloadIds))
+            putBoolean(PlaybackCommands.SCROLLING, preloadScrolling || !playbackPageVisible ||
+                (!foreground && !settings.backgroundPlay))
+        })
+    }
+
+    fun refreshCacheUsage() { requestCacheCommand(clear = false) }
+
+    fun clearCache() {
+        if (clearingCache) return
+        frames.clear()
+        requestCacheCommand(clear = true)
+    }
+
+    private fun requestCacheCommand(clear: Boolean) {
+        val player = controller ?: run { cacheStatus = "播放服务暂未连接"; return }
+        if (!clear && !clearingCache) cacheStatus = null
+        if (clear) { clearingCache = true; cacheStatus = "正在清理…" }
+        val result = player.sendCustomCommand(SessionCommand(
+            if (clear) PlaybackCommands.CLEAR_CACHE else PlaybackCommands.CACHE_SIZE, Bundle.EMPTY), Bundle.EMPTY)
+        result.addListener({
+            try {
+                val reply = result.get()
+                check(reply.resultCode == SessionResult.RESULT_SUCCESS)
+                playbackCacheBytes = reply.extras.getLong(PlaybackCommands.BYTES)
+                if (clear) cacheStatus = "缓存已清理"
+            } catch (_: Exception) { cacheStatus = if (clear) "清理失败，请重试" else "暂时无法读取缓存" }
+            finally { if (clear) clearingCache = false }
+        }, ContextCompat.getMainExecutor(getApplication<Application>()))
     }
 
     fun unmute() { requestedUnmute = true; controller?.volume = 1f }
 
     fun updateSettings(value: PlayerSettings) {
-        val shuffleChanged = settings.shuffle != value.shuffle
+        val orderChanged = settings.shuffle != value.shuffle || settings.preferUnwatched != value.preferUnwatched
         settings = value
         if (value.global2x) longPress = false
         prefs.edit {
             putBoolean("isShuffleEnabled", value.shuffle)
+            putBoolean("preferUnwatched", value.preferUnwatched)
             putBoolean("isAutoNext", value.autoNext)
             putInt("resizeMode", if (value.crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT)
             putBoolean("isGlobal2xSpeed", value.global2x)
@@ -352,8 +432,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             putString("app_theme", value.theme.preferenceValue)
         }
         applyPlaybackSettings()
-        if (shuffleChanged) { videos = orderVideos(library, value.shuffle); syncQueue() }
+        if (orderChanged) { videos = orderedLibrary(); syncQueue() }
     }
+
+    private fun orderedLibrary() = orderVideos(library, settings.shuffle, watchedIds, settings.preferUnwatched)
 
     private fun applyPlaybackSettings() {
         controller?.apply {
@@ -389,7 +471,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             .setMediaMetadata(MediaMetadata.Builder().setTitle(entry.name).build()).build()
         if (wasEmpty || resetSelection) {
             val selected = selection[activeMode]
-            val index = target.indexOfFirst { it.id == selected }.coerceAtLeast(0)
+            val index = initialVideoIndex(target, selected, watchedIds,
+                wasEmpty && settings.shuffle && settings.preferUnwatched)
             val id = target[index].id
             val position = positions[id] ?: if (prefs.getString("playback_uri", null) == id)
                 prefs.getLong("playback_position", 0L).coerceAtLeast(0L) else 0L
@@ -419,6 +502,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        getApplication<Application>().unregisterComponentCallbacks(memoryCallbacks)
+        watchHistory.preferences.unregisterOnSharedPreferenceChangeListener(historyListener)
         rememberPosition()
         controller?.removeListener(listener)
         future?.let(MediaController::releaseFuture)

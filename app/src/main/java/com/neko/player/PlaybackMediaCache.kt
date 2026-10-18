@@ -11,6 +11,8 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.SettableFuture
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -27,6 +29,21 @@ internal class PlaybackMediaCache(context: Context) {
     private val generation = AtomicInteger()
     @Volatile private var writer: CacheWriter? = null
     private var requested = emptyList<String>()
+
+    val bytes: Long get() = cache.cacheSpace
+
+    fun clear(): ListenableFuture<Long> {
+        preload(emptyList())
+        val result = SettableFuture.create<Long>()
+        worker.execute {
+            try {
+                // The cache owns its files and locks. Never delete its directory under the player.
+                cache.keys.toList().forEach(cache::removeResource)
+                result.set(cache.cacheSpace)
+            } catch (error: Exception) { result.setException(error) }
+        }
+        return result
+    }
 
     fun preload(uris: List<String>) {
         if (uris == requested) return

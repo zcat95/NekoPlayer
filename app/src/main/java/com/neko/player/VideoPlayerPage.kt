@@ -8,76 +8,34 @@ import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** Only video pixels live here; controls and blur output are sibling layers. */
 @OptIn(UnstableApi::class)
 @Composable
-fun VideoPlayerPage(entry: VideoEntry, active: Boolean, model: PlayerViewModel, modifier: Modifier = Modifier) {
-    val player = model.controller
-    var firstFrame by remember(entry.id, player, active) { mutableStateOf(false) }
+fun VideoPlayerPage(entry: VideoEntry, active: Boolean, model: PlayerViewModel,
+                    modifier: Modifier = Modifier, frameReady: Boolean = false) {
     val preview = model.frames.peek(entry.id)
     LaunchedEffect(entry.id) { model.frames.request(entry.id).await() }
-    val globalSpeed by rememberUpdatedState(model.settings.global2x)
-    val resizeMode = if (model.settings.crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-    Box(modifier = modifier.fillMaxSize().background(Color.Black).pointerInput(entry.id, active) {
-        if (!active) return@pointerInput
-        var held = false
-        detectTapGestures(
+    Box(modifier = modifier.fillMaxSize()
+        .background(if (active && frameReady) Color.Transparent else Color.Black)
+        .videoGestures(entry.id, active, model.settings.global2x,
             onDoubleTap = { model.updateSettings(model.settings.copy(crop = !model.settings.crop)) },
-            onTap = { if (!held) model.togglePlayback() },
-            onLongPress = {},
-            onPress = {
-                held = false
-                coroutineScope {
-                    val job = launch {
-                        delay(200)
-                        held = true
-                        if (!globalSpeed) model.onLongPressChanged(true)
-                    }
-                    try { tryAwaitRelease() } finally {
-                        job.cancel()
-                        model.onLongPressChanged(false)
-                    }
-                }
-            },
-        )
-    }) {
-        if (active && player != null) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context -> VideoTextureLayout(context).apply { bind(player, entry.id) { firstFrame = true } } },
-                update = { view ->
-                    view.resizeMode = resizeMode
-                    view.keepScreenOn = model.isPlaying
-                },
-                onRelease = { it.dispose() },
-            )
-        }
+            onTap = model::togglePlayback, onAcceleration = model::onLongPressChanged)) {
         // Neighbours are already visible during the drag. Replace the preview atomically at first frame.
-        if ((!active || !firstFrame) && preview != null) {
+        if ((!active || !frameReady) && preview != null) {
             Image(preview.asImageBitmap(), null, Modifier.fillMaxSize(),
                 contentScale = if (model.settings.crop) ContentScale.Crop else ContentScale.Fit)
         }
@@ -85,31 +43,50 @@ fun VideoPlayerPage(entry: VideoEntry, active: Boolean, model: PlayerViewModel, 
     }
 }
 
+/** One native rendering view per active feed. Changing clips must not recreate its texture/surface. */
+@OptIn(UnstableApi::class)
+@Composable
+internal fun VideoPlaybackSurface(player: Player, crop: Boolean, playing: Boolean,
+                                  onFirstFrame: (String) -> Unit, modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier.fillMaxSize(),
+        factory = { context -> VideoTextureLayout(context) },
+        update = { view ->
+            view.resizeMode = if (crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+            view.keepScreenOn = playing
+            view.bind(player, onFirstFrame)
+        },
+        onRelease = { it.dispose() },
+    )
+}
+
 @OptIn(UnstableApi::class)
 private class VideoTextureLayout(context: Context) : FrameLayout(context) {
     private var player: Player? = null
-    private var onFirstFrame: () -> Unit = {}
-    private var expectedId: String? = null
+    private var onFirstFrame: (String) -> Unit = {}
     private val aspect = AspectRatioFrameLayout(context)
     var resizeMode: Int
         get() = aspect.resizeMode
         set(value) { aspect.resizeMode = value }
     private val texture = TextureView(context)
     private val listener = object : Player.Listener {
-        override fun onRenderedFirstFrame() { if (player?.currentMediaItem?.mediaId == expectedId) onFirstFrame() }
+        override fun onRenderedFirstFrame() { player?.currentMediaItem?.mediaId?.let(onFirstFrame) }
         override fun onVideoSizeChanged(videoSize: VideoSize) { updateRatio(videoSize) }
     }
     init {
         addView(aspect, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.CENTER))
         aspect.addView(texture, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
-    fun bind(value: Player, mediaId: String, onFrame: () -> Unit) {
-        player = value
-        expectedId = mediaId
+    fun bind(value: Player, onFrame: (String) -> Unit) {
+        val changed = player !== value
+        if (changed) dispose()
         onFirstFrame = onFrame
-        value.addListener(listener)
-        updateRatio(value.videoSize)
-        value.setVideoTextureView(texture)
+        if (changed) {
+            player = value
+            value.addListener(listener)
+            updateRatio(value.videoSize)
+            value.setVideoTextureView(texture)
+        }
     }
     private fun updateRatio(size: VideoSize) {
         if (size.width > 0 && size.height > 0) aspect.setAspectRatio(size.width.toFloat() * size.pixelWidthHeightRatio / size.height)
