@@ -4,7 +4,14 @@ import java.util.Locale
 import kotlin.random.Random
 
 /** IDs are provider URIs; display names must never be inferred from those opaque IDs. */
-data class VideoEntry(val id: String, val name: String)
+data class VideoEntry(val id: String, val name: String, val identity: String = id, val sourceDirectory: String? = null)
+
+/** Overlapping tree grants can expose the same document through different playable URIs. */
+fun mergeVideos(libraries: List<List<VideoEntry>>): List<VideoEntry> =
+    libraries.flatten().distinctBy { it.identity }
+
+internal fun previewCacheBudget(memoryClassMb: Int, lowRam: Boolean): Int =
+    (if (lowRam) 8 else (memoryClassMb / 16).coerceIn(8, 24)) * 1024 * 1024
 
 /** Current frame first, then the next two clips and the previous clip; no wrap or invalid indices. */
 fun previewIndices(current: Int, size: Int, direction: Int = 1, target: Int = current,

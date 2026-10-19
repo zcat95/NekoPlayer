@@ -13,8 +13,8 @@ android {
         applicationId = "com.neko.player"
         minSdk = 31
         targetSdk = 37
-        versionCode = 15
-        versionName = "2.5.1"
+        versionCode = 16
+        versionName = "2.6.0-beta.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

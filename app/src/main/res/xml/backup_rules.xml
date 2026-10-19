@@ -3,4 +3,5 @@
     <!-- Directory grants do not transfer with preferences. New installs must run setup. -->
     <exclude domain="sharedpref" path="neko_first_launch.xml" />
     <exclude domain="sharedpref" path="neko_watch_history.xml" />
+    <exclude domain="file" path="diagnostics/" />
 </full-backup-content>

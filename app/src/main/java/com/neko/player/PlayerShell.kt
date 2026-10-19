@@ -32,9 +32,12 @@ import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-internal fun AppScreen(model: PlayerViewModel, chooseDirectory: () -> Unit) {
+internal fun AppScreen(model: PlayerViewModel, reauthorizeDirectory: (String) -> Unit = {},
+                       chooseDirectory: () -> Unit) {
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var about by rememberSaveable { mutableStateOf(false) }
+    var directoryManager by rememberSaveable { mutableStateOf(false) }
+    var diagnostics by rememberSaveable { mutableStateOf(false) }
     val pages = rememberPagerState(initialPage = model.activeMode, pageCount = { 2 })
     val scope = rememberCoroutineScope()
     AppSystemBars(immersive = !settingsOpen && !about)
@@ -42,6 +45,8 @@ internal fun AppScreen(model: PlayerViewModel, chooseDirectory: () -> Unit) {
         if (model.pendingHomeLaunch) {
             about = false
             settingsOpen = false
+            directoryManager = false
+            diagnostics = false
             pages.scrollToPage(0)
             model.onHomeLaunchHandled()
         }
@@ -55,7 +60,9 @@ internal fun AppScreen(model: PlayerViewModel, chooseDirectory: () -> Unit) {
     BackHandler(enabled = pages.currentPage != 0 && !settingsOpen && !about) {
         scope.launch { pages.animateScrollToPage(0) }
     }
-    BackHandler(enabled = settingsOpen && !about) { settingsOpen = false }
+    BackHandler(enabled = settingsOpen && !about && !directoryManager && !diagnostics) { settingsOpen = false }
+    BackHandler(enabled = directoryManager && !about) { directoryManager = false }
+    BackHandler(enabled = diagnostics && !about) { diagnostics = false }
     BackHandler(enabled = about) { about = false }
     val backdrop = rememberLayerBackdrop()
     val coveredBlur by animateFloatAsState(if (settingsOpen || about) 12f else 0f, tween(300), label = "detailCoveredBlur")
@@ -69,13 +76,22 @@ internal fun AppScreen(model: PlayerViewModel, chooseDirectory: () -> Unit) {
         Box(Modifier.fillMaxSize().layerBackdrop(backdrop)) {
             HorizontalPager(pages, Modifier.fillMaxSize().blur(coveredBlur.dp).testTag("main-pages"),
                 userScrollEnabled = !settingsOpen && !about, beyondViewportPageCount = 1) { page ->
-                VideoScreen(model, page, chooseDirectory)
+                VideoScreen(model, page) {
+                    if (model.directories.isEmpty()) chooseDirectory()
+                    else { settingsOpen = true; directoryManager = true }
+                }
             }
             AnimatedVisibility(settingsOpen,
                 enter = slideInHorizontally(tween(252, easing = FastOutSlowInEasing)) { it / 7 } + fadeIn(tween(189)),
                 exit = slideOutHorizontally(tween(207, easing = FastOutSlowInEasing)) { it / 7 } + fadeOut(tween(162))) {
                 Box(Modifier.fillMaxSize().blur(if (about) 12.dp else 0.dp)) {
-                    SettingsPage(model, chooseDirectory, onBack = { settingsOpen = false }, onAbout = { about = true })
+                    when {
+                        directoryManager -> DirectoryManager(model, chooseDirectory, reauthorizeDirectory, onBack = { directoryManager = false })
+                        diagnostics -> DiagnosticsPage(model, onBack = { diagnostics = false })
+                        else -> SettingsPage(model, onChangeFolder = { directoryManager = true },
+                            onBack = { settingsOpen = false }, onAbout = { about = true },
+                            onDiagnostics = { diagnostics = true })
+                    }
                 }
             }
             AnimatedVisibility(about,
@@ -86,7 +102,7 @@ internal fun AppScreen(model: PlayerViewModel, chooseDirectory: () -> Unit) {
         }
         if (!settingsOpen && !about) PlayerBottomBar(selected, backdrop, dark,
             likeEnabled = model.playlist(pages.settledPage).isNotEmpty() && model.currentId != null,
-            isLiked = model.currentId in model.likedIds,
+            isLiked = model.isLiked(model.currentId),
             onLike = {
                 model.currentId?.let(model::toggleLike)
                 haptic()

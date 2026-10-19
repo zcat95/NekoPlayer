@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -100,6 +101,7 @@ internal class OpenVideoDirectory : ActivityResultContract<Uri?, DirectoryGrant?
 @OptIn(UnstableApi::class)
 @Composable
 private fun NekoApp(model: PlayerViewModel) {
+    DiagnosticWindowMonitor(model.diagnostics)
     if (!model.onboardingCompleted) AppSystemBars()
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner, model) {
@@ -112,13 +114,20 @@ private fun NekoApp(model: PlayerViewModel) {
     val setupDirectoryPicker = rememberLauncherForActivityResult(OpenVideoDirectory()) { grant ->
         if (grant != null) model.selectDirectory(grant.uri, grant.flags)
     }
+    var replacementDirectory by rememberSaveable { mutableStateOf<String?>(null) }
+    val managedDirectoryPicker = rememberLauncherForActivityResult(OpenVideoDirectory()) { grant ->
+        if (grant != null) model.selectDirectory(grant.uri, grant.flags, replacementDirectory)
+        replacementDirectory = null
+    }
     AnimatedContent(model.onboardingCompleted, modifier = Modifier.fillMaxSize(),
         transitionSpec = { setupTransition() }, label = "setupCompletion") { completed ->
         val radius by transition.animateFloat(transitionSpec = { tween(520) }, label = "setupCompletionBlur") {
             if (it == EnterExitState.PostExit) 14f else 0f
         }
         Box(Modifier.fillMaxSize().blur(radius.dp)) {
-            if (completed) AppScreen(model) { setupDirectoryPicker.launch(model.directory?.toUri()) }
+            if (completed) AppScreen(model,
+                chooseDirectory = { replacementDirectory = null; managedDirectoryPicker.launch(null) },
+                reauthorizeDirectory = { replacementDirectory = it; managedDirectoryPicker.launch(it.toUri()) })
             else FirstLaunchWizard(model.directoryLabel, model.directoryReadable, model.scanning, model.settings,
                 model.message, { setupDirectoryPicker.launch(model.directory?.toUri()) }, model::updateSettings,
                 model::dismissMessage, model::finishOnboarding)
@@ -148,9 +157,9 @@ internal fun VideoScreen(model: PlayerViewModel, mode: Int, chooseDirectory: () 
             Text("暂无收藏视频，在首页点赞后会显示在这里。", color = Color.White,
                 modifier = Modifier.align(Alignment.Center).padding(24.dp))
         } else if (model.videos.isEmpty()) Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(if (model.directory == null) "选择本地视频目录开始播放" else "没有找到视频，请检查目录或读取权限。", color = Color.White)
+            Text(if (model.directory == null) "选择本地视频目录开始播放" else "没有可播放的视频，请检查目录是否启用及读取权限。", color = Color.White)
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { chooseDirectory() }) { Text("选择视频目录") }
+            Button(onClick = { chooseDirectory() }) { Text(if (model.directories.isEmpty()) "选择视频目录" else "管理视频目录") }
         }
         model.message?.let { message ->
             Column(Modifier.align(Alignment.Center).padding(24.dp)
@@ -185,11 +194,15 @@ private fun VideoPlaylist(model: PlayerViewModel, mode: Int) {
             if (!scrolling) entries.getOrNull(index)?.let { model.selectVideo(it.id) }
         }
     }
-    LaunchedEffect(pager, entries, active) {
+    LaunchedEffect(pager, entries, active, model.previewsAllowed) {
         val policy = SwipePreloadPolicy()
-        if (active) snapshotFlow { Triple(pager.currentPage, pager.targetPage, pager.isScrollInProgress) }
+        if (active && model.previewsAllowed) snapshotFlow { Triple(pager.currentPage, pager.targetPage, pager.isScrollInProgress) }
             .distinctUntilChanged().collect { (current, target, scrolling) ->
             model.prefetchVideos(mode, policy.update(current, target, entries.size, scrolling, SystemClock.elapsedRealtime()))
+        }
+        else if (!active && model.previewsAllowed) {
+            val selected = entries.firstOrNull { it.id == model.selectedId(mode) } ?: entries.firstOrNull()
+            selected?.let { model.frames.request(it.id).await() }
         }
     }
     if (entries.isEmpty()) {
@@ -203,7 +216,7 @@ private fun VideoPlaylist(model: PlayerViewModel, mode: Int) {
         val currentIndex = entries.indexOfFirst { it.id == currentId }
         if (active && player != null && currentId != null && currentIndex >= 0) {
             VideoPlaybackSurface(player, model.settings.crop, model.isPlaying,
-                onFirstFrame = { renderedId = it },
+                onFirstFrame = { renderedId = it; model.onRenderedFirstFrame(it) },
                 modifier = Modifier.graphicsLayer {
                     // Follow the playing page during a drag without recreating or rebinding the surface.
                     translationY = ((currentIndex - pager.currentPage) - pager.currentPageOffsetFraction) * size.height
@@ -212,7 +225,7 @@ private fun VideoPlaylist(model: PlayerViewModel, mode: Int) {
         VerticalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { entries[it].id }) { index ->
             val entry = entries[index]
             VideoPlayerPage(entry, active && entry.id == currentId, model,
-                frameReady = renderedId == entry.id)
+                frameReady = renderedId == entry.id, loadPreview = false)
         }
     }
 }

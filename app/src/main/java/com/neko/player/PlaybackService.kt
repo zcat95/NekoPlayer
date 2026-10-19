@@ -18,6 +18,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -29,6 +30,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 /** Owns the sole playing decoder and media notification, independently of Activity/Compose. */
 @OptIn(UnstableApi::class)
@@ -36,6 +38,9 @@ class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var mediaCache: PlaybackMediaCache
     private lateinit var watchHistory: WatchHistory
+    private val diagnostics by lazy { PerformanceDiagnostics.get(this) }
+    private val queueWriter = Executors.newSingleThreadExecutor()
+    private var diagnosticMediaId: String? = null
     private val watchProgress = WatchProgress()
     private var preferredPreloadIds: List<String>? = null
     private var preloadSuspended = false
@@ -63,12 +68,6 @@ class PlaybackService : MediaSessionService() {
     private val failedIds = mutableSetOf<String>()
     private val prefs by lazy { getSharedPreferences("neko_prefs", MODE_PRIVATE) }
     private val queueCheckpoint = Runnable { saveQueue() }
-    private val checkpoint = object : Runnable {
-        override fun run() {
-            savePosition()
-            handler.postDelayed(this, 5_000)
-        }
-    }
 
     override fun onCreate() {
         super.onCreate()
@@ -76,7 +75,8 @@ class PlaybackService : MediaSessionService() {
         mediaCache = PlaybackMediaCache(this)
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(mediaCache.factory))
-            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 250, 500).build())
+            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(3_000, 10_000, 150, 500)
+                .setTargetBufferBytes(24 * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build())
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
             .setHandleAudioBecomingNoisy(true)
@@ -85,8 +85,14 @@ class PlaybackService : MediaSessionService() {
         player.repeatMode = if (prefs.getBoolean("isAutoNext", true)) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
         player.volume = if (prefs.getBoolean("isColdStartMuted", false)) 0f else 1f
         player.setPlaybackSpeed(if (prefs.getBoolean("isGlobal2xSpeed", false)) 2f else 1f)
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                diagnostics.dropped(droppedFrames)
+            }
+        })
         player.addListener(object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
+                diagnostics.playing(player.isPlaying)
                 handler.removeCallbacks(watchCheckpoint)
                 watchCheckpoint.run()
             }
@@ -98,18 +104,24 @@ class PlaybackService : MediaSessionService() {
                 handler.postDelayed(preloadNeighbours, 150)
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                savePosition()
+                saveSelection()
+                mediaItem?.mediaId?.let { id ->
+                    if (id != diagnosticMediaId || reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                        reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) diagnostics.requested(id, "media_transition")
+                    diagnosticMediaId = id
+                }
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) preferredPreloadIds = null
                 mediaCache.preload(emptyList())
                 handler.removeCallbacks(preloadNeighbours)
                 handler.postDelayed(preloadNeighbours, 150)
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                handler.removeCallbacks(checkpoint)
-                if (isPlaying) handler.post(checkpoint) else savePosition()
+                if (!isPlaying) saveSelection()
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
+                diagnostics.buffering(playbackState == Player.STATE_BUFFERING)
                 if (playbackState == Player.STATE_READY) {
+                    player.videoFormat?.let { diagnostics.videoFormat(it.sampleMimeType, it.width, it.height, it.frameRate) }
                     handler.removeCallbacks(preloadNeighbours)
                     handler.postDelayed(preloadNeighbours, 150)
                     player.currentMediaItem?.mediaId?.let(failedIds::remove)
@@ -117,6 +129,8 @@ class PlaybackService : MediaSessionService() {
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
+                diagnostics.error(error.errorCodeName)
+                diagnostics.buffering(false)
                 session?.setSessionExtras(Bundle().apply {
                     putString("playback_error", "无法播放当前视频，已尝试跳过。请检查文件是否损坏或目录权限是否有效。")
                     putLong("error_time", android.os.SystemClock.elapsedRealtime())
@@ -154,8 +168,12 @@ class PlaybackService : MediaSessionService() {
                         return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
                     return when (customCommand.customAction) {
                         PlaybackCommands.PREFETCH -> {
-                            preferredPreloadIds = args.getStringArrayList(PlaybackCommands.IDS)?.take(4)
-                            preloadSuspended = args.getBoolean(PlaybackCommands.SCROLLING)
+                            val ids = args.getStringArrayList(PlaybackCommands.IDS)?.take(4)
+                            val suspended = args.getBoolean(PlaybackCommands.SCROLLING)
+                            if (ids == preferredPreloadIds && suspended == preloadSuspended)
+                                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                            preferredPreloadIds = ids
+                            preloadSuspended = suspended
                             handler.removeCallbacks(preloadNeighbours)
                             mediaCache.preload(emptyList())
                             if (!preloadSuspended) handler.postDelayed(preloadNeighbours, 150)
@@ -180,7 +198,7 @@ class PlaybackService : MediaSessionService() {
                     val items = restoreQueue()
                     val index = items.indexOfFirst { it.mediaId == prefs.getString("playback_uri", null) }.coerceAtLeast(0)
                     return Futures.immediateFuture(MediaSession.MediaItemsWithStartPosition(
-                        items, index, prefs.getLong("playback_position", 0L).coerceAtLeast(0L)))
+                        items, index, 0L))
                 }
             }).build()
     }
@@ -197,23 +215,25 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    private fun savePosition() {
+    private fun saveSelection() {
         val item = player.currentMediaItem ?: return
         val key = if (prefs.getInt("active_mode", 0) == 0) "saved_video_uri" else "saved_liked_video_uri"
         prefs.edit {
             putString("playback_uri", item.mediaId)
-            putLong("playback_position", player.currentPosition.coerceAtLeast(0L))
             putString(key, item.mediaId)
         }
     }
 
     private fun saveQueue() {
-        val queue = JSONArray()
-        for (index in 0 until player.mediaItemCount) {
+        val entries = List(player.mediaItemCount) { index ->
             val item = player.getMediaItemAt(index)
-            queue.put(JSONObject().put("id", item.mediaId).put("name", item.mediaMetadata.title?.toString().orEmpty()))
+            item.mediaId to item.mediaMetadata.title?.toString().orEmpty()
         }
-        prefs.edit { putString("playback_queue", queue.toString()) }
+        queueWriter.execute {
+            val queue = JSONArray()
+            entries.forEach { (id, name) -> queue.put(JSONObject().put("id", id).put("name", name)) }
+            prefs.edit { putString("playback_queue", queue.toString()) }
+        }
     }
 
     private fun restoreQueue(): List<MediaItem> = try {
@@ -227,8 +247,11 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        savePosition()
+        saveSelection()
         saveQueue()
+        queueWriter.shutdown()
+        diagnostics.playing(false)
+        diagnostics.buffering(false)
         session?.release()
         session = null
         player.release()

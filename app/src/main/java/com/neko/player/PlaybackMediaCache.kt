@@ -51,10 +51,11 @@ internal class PlaybackMediaCache(context: Context) {
         val request = generation.incrementAndGet()
         writer?.cancel()
         worker.execute {
-            for (uri in uris) {
+            for ((index, uri) in uris.withIndex()) {
                 if (generation.get() != request) break
                 val current = CacheWriter(factory.createDataSource(),
-                    DataSpec.Builder().setUri(uri.toUri()).setLength(2L * 1024 * 1024).build(), ByteArray(64 * 1024), null)
+                    DataSpec.Builder().setUri(uri.toUri()).setLength(if (index == 0) 1024L * 1024 else 512L * 1024).build(),
+                    ByteArray(64 * 1024), null)
                 writer = current
                 if (generation.get() != request) { current.cancel(); break }
                 runCatching { current.cache() } // Missing/revoked files are reported only if actually played.

@@ -1,6 +1,7 @@
 package com.neko.player
 
 import android.content.Context
+import android.app.ActivityManager
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.util.LruCache
@@ -20,7 +21,9 @@ import kotlinx.coroutines.sync.withPermit
 
 /** Bounded decoded first frames, requested before neighbours enter the viewport. Main-thread API. */
 internal class VideoFrameCache(private val context: Context, private val scope: CoroutineScope) {
-    private val cache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
+    private val activity = context.getSystemService(ActivityManager::class.java)
+    private val diagnostics = PerformanceDiagnostics.get(context)
+    private val cache = object : LruCache<String, Bitmap>(previewCacheBudget(activity.memoryClass, activity.isLowRamDevice)) {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
     private val pending = mutableMapOf<String, Deferred<Bitmap?>>()
@@ -42,12 +45,12 @@ internal class VideoFrameCache(private val context: Context, private val scope: 
                     runCatching {
                         MediaMetadataRetriever().use { retriever ->
                             retriever.setDataSource(context, id.toUri())
-                            retriever.getScaledFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 720, 1280)
+                            retriever.getScaledFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 960, 960)
                         }
                     }.getOrNull()
                 }
             }
-            if (frame != null) { cache.put(id, frame); revision++ } else failed += id
+            if (frame != null) { cache.put(id, frame); diagnostics.previewBytes(cache.size().toLong()); revision++ } else failed += id
             frame
         }
         pending[id] = task
@@ -69,11 +72,14 @@ internal class VideoFrameCache(private val context: Context, private val scope: 
     }
 
     fun clear() {
-        pending.values.toList().forEach { it.cancel() }
+        cancelPending()
         cache.evictAll()
+        diagnostics.previewBytes(0)
         failed.clear()
         revision++
     }
+
+    fun cancelPending() { pending.values.toList().forEach { it.cancel() } }
 
     fun onLibraryChanged() { failed.clear() }
 }
